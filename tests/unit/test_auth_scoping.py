@@ -270,6 +270,120 @@ class TestCloneWithFallbackEnv:
 
 
 # ===========================================================================
+# Regression: ssh:// URLs with custom ports (issues #661, #731)
+# ===========================================================================
+
+class TestCloneWithFallbackPortPreservation:
+    """Verify that custom SSH/HTTPS ports are preserved across all clone attempts.
+
+    Regression for #661 and #731: Bitbucket Datacenter and self-hosted GitLab
+    can serve git over non-default ports (e.g. SSH on 7999, HTTPS on 8443).
+    The fix threads DependencyReference.port through _build_repo_url to the
+    SSH and HTTPS URL builders so the port is never silently dropped.
+    """
+
+    def _run_clone_capture_urls(self, dep, clone_fails=True):
+        """Run _clone_with_fallback and return every URL passed to clone_from.
+
+        When clone_fails is True, all clone attempts raise GitCommandError,
+        letting the fallback chain exercise both SSH and HTTPS attempts so
+        we can capture every emitted URL.
+        """
+        dl = _make_downloader()
+        dl.auth_resolver._cache.clear()
+
+        called_urls = []
+
+        def _fake_clone(url, *a, **kw):
+            called_urls.append(url)
+            if clone_fails:
+                raise GitCommandError("clone", "failed")
+            mock_repo = Mock()
+            mock_repo.head.commit.hexsha = "abc123"
+            return mock_repo
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch(
+                 "apm_cli.core.token_manager.GitHubTokenManager.resolve_credential_from_git",
+                 return_value=None,
+             ), \
+             patch('apm_cli.deps.github_downloader.Repo') as MockRepo:
+            MockRepo.clone_from.side_effect = _fake_clone
+            target = Path(tempfile.mkdtemp())
+            try:
+                dl._clone_with_fallback(dep.repo_url, target, dep_ref=dep)
+            except (RuntimeError, GitCommandError):
+                pass
+            finally:
+                import shutil
+                shutil.rmtree(target, ignore_errors=True)
+        return called_urls
+
+    def test_ssh_attempt_uses_port_when_dep_ref_has_port(self):
+        """Method 2 (SSH) must emit ssh://host:7999/... when dep_ref.port=7999."""
+        dep = _dep("ssh://git@bitbucket.example.com:7999/project/repo.git")
+        assert dep.port == 7999, "port not captured from ssh:// URL"
+
+        urls = self._run_clone_capture_urls(dep)
+        ssh_urls = [u for u in urls if u.startswith("ssh://")]
+        assert ssh_urls, f"no ssh:// URL attempted, got: {urls!r}"
+        assert ssh_urls[0] == "ssh://git@bitbucket.example.com:7999/project/repo.git", (
+            f"SSH URL should include port 7999, got: {ssh_urls[0]!r}"
+        )
+
+    def test_https_attempt_preserves_same_port_across_protocols(self):
+        """Method 3 (HTTPS) must emit https://host:7999/... — same port as SSH."""
+        dep = _dep("ssh://git@bitbucket.example.com:7999/project/repo.git")
+
+        urls = self._run_clone_capture_urls(dep)
+        https_urls = [u for u in urls if u.startswith("https://")]
+        assert https_urls, f"no https:// fallback attempted, got: {urls!r}"
+        parsed = urlparse(https_urls[0])
+        assert parsed.hostname == "bitbucket.example.com", (
+            f"HTTPS host mismatch: {https_urls[0]!r}"
+        )
+        assert parsed.port == 7999, (
+            f"HTTPS URL should preserve port 7999, got: {https_urls[0]!r}"
+        )
+
+    def test_ssh_no_port_keeps_scp_shorthand(self):
+        """Without a port, SSH builder uses scp shorthand (git@host:path)."""
+        dep = _dep("ssh://git@github.com/org/repo.git")
+        assert dep.port is None
+
+        urls = self._run_clone_capture_urls(dep)
+        ssh_urls = [u for u in urls if "git@" in u and not u.startswith("https://")]
+        assert ssh_urls, f"no SSH URL attempted, got: {urls!r}"
+        # scp shorthand carries no port; ssh:// form must not inject a default port.
+        if ssh_urls[0].startswith("ssh://"):
+            assert urlparse(ssh_urls[0]).port is None, (
+                f"ssh:// URL must not carry a default port, got: {ssh_urls[0]!r}"
+            )
+        else:
+            # SCP shorthand `git@host:path` — path segment must not be purely numeric.
+            path_segment = ssh_urls[0].split(":", 1)[1].split("/", 1)[0]
+            assert not path_segment.isdigit(), (
+                f"SCP shorthand must not leak a port into the path: {ssh_urls[0]!r}"
+            )
+
+    def test_https_url_with_custom_port_preserved_through_fallback(self):
+        """https:// URL with port must survive through to the HTTPS clone attempt."""
+        dep = _dep("https://git.company.internal:8443/team/repo.git")
+        assert dep.port == 8443
+
+        urls = self._run_clone_capture_urls(dep)
+        https_urls = [u for u in urls if u.startswith("https://")]
+        assert https_urls, f"no HTTPS URL attempted, got: {urls!r}"
+        parsed = urlparse(https_urls[0])
+        assert parsed.hostname == "git.company.internal", (
+            f"HTTPS host mismatch: {https_urls[0]!r}"
+        )
+        assert parsed.port == 8443, (
+            f"HTTPS URL should preserve port 8443, got: {https_urls[0]!r}"
+        )
+
+
+# ===========================================================================
 # Object-style dependency entries (parse_from_dict)
 # ===========================================================================
 

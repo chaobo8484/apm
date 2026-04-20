@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add APM Review Panel skill (`.github/skills/apm-review-panel/`) and four new specialist personas (`devx-ux-expert`, `supply-chain-security-expert`, `apm-ceo`, `oss-growth-hacker`) with auto-activating per-persona skills. Routes specialist findings through an APM CEO arbiter for strategic / breaking-change calls, with the OSS growth hacker side-channeling adoption insights via `WIP/growth-strategy.md`. Instrumentation per Handbook Ch. 9 (`The Instrumented Codebase`); PROSE-compliant (thin SKILL.md routers, persona detail lazy-loaded via markdown links, explicit boundaries per persona).
 
+### Fixed
+
+- Preserve custom git ports across protocols: non-default ports on `ssh://` and `https://` dependency URLs (e.g. Bitbucket Datacenter on SSH port 7999, self-hosted GitLab on HTTPS port 8443) are now captured as a first-class `port` field on `DependencyReference` and threaded through all clone URL builders. When the SSH clone fails, the HTTPS fallback reuses the same port instead of silently dropping it (#661, #731)
+
 ## [0.8.12] - 2026-04-19
 
 ### Added
