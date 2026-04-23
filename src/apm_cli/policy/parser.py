@@ -240,10 +240,14 @@ def load_policy(source: Union[str, Path]) -> Tuple[ApmPolicy, List[str]]:
     """
     path = Path(source) if not isinstance(source, Path) else source
 
-    if path.is_file():
+    try:
+        is_file = path.is_file()
+    except OSError:
+        is_file = False
+
+    if is_file:
         raw = path.read_text(encoding="utf-8")
     else:
-        # Treat source as a YAML string
         raw = str(source)
 
     try:
