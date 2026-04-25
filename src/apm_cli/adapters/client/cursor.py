@@ -1,17 +1,22 @@
 """Cursor IDE implementation of MCP client adapter.
 
 Cursor uses the standard ``mcpServers`` JSON format at ``.cursor/mcp.json``
-(repo-local).  The config schema is identical to GitHub Copilot CLI, so this
-adapter subclasses :class:`CopilotClientAdapter` and only overrides the
-config-path logic and the user-facing labels.
+(repo-local).  Cursor's schema differs from Copilot CLI in key ways:
+
+- ``type`` must be ``"stdio"`` or ``"http"`` (not ``"local"``).
+- ``tools`` and ``id`` fields are not supported.
+
+This adapter delegates config formatting to :class:`CopilotClientAdapter`
+and then transforms the result for Cursor compatibility.
 
 APM only writes to ``.cursor/mcp.json`` when the ``.cursor/`` directory
-already exists — Cursor support is opt-in.
+already exists -- Cursor support is opt-in.
 """
 
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 from .copilot import CopilotClientAdapter
 
@@ -19,20 +24,15 @@ from .copilot import CopilotClientAdapter
 class CursorClientAdapter(CopilotClientAdapter):
     """Cursor IDE MCP client adapter.
 
-    Inherits config path and read/write logic from this class, but
-    **must** override :meth:`_format_server_config` because Cursor's JSON
-    schema differs from Copilot CLI's in two critical ways:
+    Inherits config path and read/write logic from :class:`CopilotClientAdapter`
+    and uses the delegate-then-transform pattern for ``_format_server_config``:
 
-    - ``type`` must be ``"stdio"`` or ``"http"`` (NOT ``"local"``).
-    - ``tools`` and ``id`` fields must **never** be emitted — they are
-      Copilot-CLI-specific and cause Cursor's MCP loader to silently
-      reject the server.
-
-    .. note::
-
-        This inheritance design is a known fragility.  ``_format_server_config``
-        **must** be explicitly overridden in each subclass; silently inheriting
-        the Copilot version will produce invalid configs for the target runtime.
+    - Calls ``super()._format_server_config()`` to get the fully-resolved config
+      (GitHub auth, header env-var resolution, ``_warn_input_variables``, etc.)
+    - Translates Cursor-incompatible fields:
+      - ``type: "local"`` becomes ``"stdio"`` (Cursor schema)
+      - ``sse/streamable-http`` transports normalized to ``"http"``
+      - Copilot-specific ``tools`` and ``id`` fields stripped
     """
 
     supports_user_scope: bool = False
@@ -45,7 +45,7 @@ class CursorClientAdapter(CopilotClientAdapter):
         """Return the path to ``.cursor/mcp.json`` in the repository root.
 
         Unlike the Copilot adapter this is a **repo-local** path.  The
-        ``.cursor/`` directory is *not* created automatically — APM only
+        ``.cursor/`` directory is *not* created automatically -- APM only
         writes here when the directory already exists.
         """
         cursor_dir = Path(os.getcwd()) / ".cursor"
@@ -150,112 +150,34 @@ class CursorClientAdapter(CopilotClientAdapter):
             return False
 
     # ------------------------------------------------------------------ #
-    # _format_server_config — MUST override; do NOT silently inherit Copilot
+    # _format_server_config — delegate to parent, then transform for Cursor
     # ------------------------------------------------------------------ #
 
-    def _format_server_config(self, server_info, env_overrides=None, runtime_vars=None):
-        """Format server info into Cursor-compatible ``.cursor/mcp.json`` format.
+    def _format_server_config(
+        self,
+        server_info: dict,
+        env_overrides: Optional[dict] = None,
+        runtime_vars: Optional[dict] = None,
+    ) -> dict:
+        """Format server config via parent, then adapt for Cursor schema.
 
-        Cursor uses ``"type": "stdio"`` or ``"type": "http"`` (NOT ``"local"``)
-        and does NOT support the ``tools`` or ``id`` fields that Copilot CLI uses.
-
-        Args:
-            server_info (dict): Server information from registry.
-            env_overrides (dict, optional): Pre-collected environment variable overrides.
-            runtime_vars (dict, optional): Pre-collected runtime variable values.
-
-        Returns:
-            dict: Cursor-compatible server configuration.
+        Cursor requires ``type: "stdio"`` (not ``"local"``) and does not
+        support the Copilot-specific ``tools`` and ``id`` fields.
         """
-        if runtime_vars is None:
-            runtime_vars = {}
+        config = super()._format_server_config(server_info, env_overrides, runtime_vars)
 
-        raw = server_info.get("_raw_stdio")
-        if raw:
-            config = {
-                "type": "stdio",
-                "command": raw["command"],
-                "args": raw["args"],
-            }
-            if raw.get("env"):
-                config["env"] = raw["env"]
-                self._warn_input_variables(raw["env"], server_info.get("name", ""), "Cursor")
-            return config
+        # Adapt type field for Cursor compatibility
+        if config.get("type") == "local":
+            config["type"] = "stdio"
+        elif config.get("type") == "http":
+            # For remote endpoints, ensure type remains http (as opposed to sse, etc.)
+            # and normalize sse/streamable-http to http for Cursor
+            transport_type = server_info.get("remotes", [{}])[0].get("transport_type", "")
+            if transport_type in ("sse", "streamable-http"):
+                config["type"] = "http"
 
-        remotes = server_info.get("remotes", [])
-        if remotes:
-            remote = remotes[0]
-            transport = (remote.get("transport_type") or "http").strip()
-            if transport in ("sse", "streamable-http"):
-                transport = "http"
-            config = {
-                "type": "http",
-                "url": remote.get("url", ""),
-            }
-            headers = remote.get("headers", [])
-            if headers:
-                if isinstance(headers, list):
-                    config["headers"] = {
-                        h["name"]: h["value"] for h in headers if "name" in h and "value" in h
-                    }
-                else:
-                    config["headers"] = headers
-            return config
-
-        packages = server_info.get("packages", [])
-        if not packages:
-            raise ValueError(
-                f"MCP server has incomplete configuration in registry - no package "
-                f"information or remote endpoints available. "
-                f"Server: {server_info.get('name', 'unknown')}"
-            )
-
-        package = self._select_best_package(packages)
-        if not package:
-            raise ValueError(
-                f"No suitable package found for MCP server "
-                f"'{server_info.get('name', 'unknown')}'"
-            )
-
-        registry_name = self._infer_registry_name(package)
-        package_name = package.get("name", "")
-        runtime_hint = package.get("runtime_hint", "")
-        runtime_arguments = package.get("runtime_arguments", [])
-        package_arguments = package.get("package_arguments", [])
-        env_vars = package.get("environment_variables", [])
-
-        resolved_env = self._resolve_environment_variables(env_vars, env_overrides)
-        processed_runtime_args = self._process_arguments(runtime_arguments, resolved_env, runtime_vars)
-        processed_package_args = self._process_arguments(package_arguments, resolved_env, runtime_vars)
-
-        config = {"type": "stdio"}
-
-        if registry_name == "npm":
-            config["command"] = runtime_hint or "npx"
-            config["args"] = ["-y", package_name] + processed_runtime_args + processed_package_args
-        elif registry_name == "docker":
-            config["command"] = "docker"
-            if processed_runtime_args:
-                config["args"] = self._inject_env_vars_into_docker_args(
-                    processed_runtime_args, resolved_env
-                )
-            else:
-                from ...core.docker_args import DockerArgsProcessor
-                config["args"] = DockerArgsProcessor.process_docker_args(
-                    ["run", "-i", "--rm", package_name],
-                    resolved_env
-                )
-        elif registry_name == "pypi":
-            config["command"] = runtime_hint or "uvx"
-            config["args"] = [package_name] + processed_runtime_args + processed_package_args
-        elif registry_name == "homebrew":
-            config["command"] = package_name.split("/")[-1] if "/" in package_name else package_name
-            config["args"] = processed_runtime_args + processed_package_args
-        else:
-            config["command"] = runtime_hint or package_name
-            config["args"] = processed_runtime_args + processed_package_args
-
-        if resolved_env:
-            config["env"] = resolved_env
+        # Remove Copilot-only fields that cause Cursor's MCP loader to silently reject servers
+        config.pop("tools", None)
+        config.pop("id", None)
 
         return config

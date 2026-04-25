@@ -242,7 +242,7 @@ def load_policy(source: Union[str, Path]) -> Tuple[ApmPolicy, List[str]]:
 
     try:
         is_file = path.is_file()
-    except OSError:
+    except (OSError, ValueError):
         is_file = False
 
     if is_file:
