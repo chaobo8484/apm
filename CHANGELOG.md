@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Day-0 install parity with `npx skills add`**: every public repo that installs cleanly with `npx skills add owner/repo` now installs cleanly with `apm install owner/repo`. APM recognises the `skills/<name>/SKILL.md` convention used by `vercel-labs/agent-skills`, `xixu-me/skills`, `larksuite/cli`, and the rest of the agentskills.io ecosystem as a first-class package shape (`SKILL_BUNDLE`). `apm.yml` is OPTIONAL for these packages -- adding it is strictly additive (lockfile + pinning) and never regresses installability. Multi-skill bundles install all skills by default; `--skill <NAME>` (repeatable) selects a subset. The selection is **persisted** in `apm.yml` (`skills:` field) and `apm.lock.yaml` (`skill_subset`), so bare `apm install` is deterministic. Use `--skill '*'` to reset to all skills. `apm audit --ci` detects drift between manifest and lockfile skill subsets.
+
 ### Fixed
 
 - Fixed TLS validation failure behind corporate TLS-intercepting proxies and firewalls: `install/validation.py` now uses `requests` (honouring `REQUESTS_CA_BUNDLE`) instead of stdlib `urllib`, and surfaces a single CA-trust hint at default verbosity instead of a misleading auth error. (#911)
