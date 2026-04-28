@@ -64,7 +64,9 @@ class TestCursorClientAdapter(unittest.TestCase):
     # -- update_config --
 
     def test_update_config_creates_file(self):
-        self.adapter.update_config({"my-server": {"command": "npx", "args": ["-y", "pkg"]}})
+        self.adapter.update_config(
+            {"my-server": {"command": "npx", "args": ["-y", "pkg"]}}
+        )
         data = json.loads(self.mcp_json.read_text(encoding="utf-8"))
         self.assertEqual(data["mcpServers"]["my-server"]["command"], "npx")
 
@@ -200,8 +202,15 @@ class TestCursorClientAdapter(unittest.TestCase):
     @patch("apm_cli.registry.client.SimpleRegistryClient.find_server_by_reference")
     @patch("apm_cli.adapters.client.copilot.GitHubTokenManager")
     def test_github_remote_server_gets_auth_header(self, mock_token_mgr, mock_find):
-        """GitHub MCP servers must receive Bearer token auth in Cursor config."""
-        mock_token_mgr.return_value.get_token_for_purpose.return_value = "ghp_test_token_12345"
+        """GitHub MCP servers must use env-var reference for auth in Cursor config.
+
+        Security: Cursor stores config in .cursor/mcp.json which may be committed
+        to git. The adapter replaces literal tokens with ${env:GITHUB_TOKEN}
+        references so secrets never touch disk.
+        """
+        mock_token_mgr.return_value.get_token_for_purpose.return_value = (
+            "ghp_test_token_12345"
+        )
         mock_find.return_value = {
             "id": "github-uuid",
             "name": "github-mcp-server",
@@ -220,7 +229,10 @@ class TestCursorClientAdapter(unittest.TestCase):
         server_cfg = data["mcpServers"]["gh-mcp"]
         self.assertEqual(server_cfg["type"], "http")
         self.assertIn("Authorization", server_cfg["headers"])
-        self.assertEqual(server_cfg["headers"]["Authorization"], "Bearer ghp_test_token_12345")
+        # Security: token must be env-var reference, not literal
+        self.assertEqual(
+            server_cfg["headers"]["Authorization"], "Bearer ${env:GITHUB_TOKEN}"
+        )
         self.assertNotIn("tools", server_cfg)
         self.assertNotIn("id", server_cfg)
 
@@ -329,7 +341,9 @@ class TestMCPIntegratorCursorStaleCleanup(unittest.TestCase):
         from apm_cli.integration.mcp_integrator import MCPIntegrator
 
         self.mcp_json.write_text(
-            json.dumps({"mcpServers": {"keep": {"command": "k"}, "stale": {"command": "s"}}}),
+            json.dumps(
+                {"mcpServers": {"keep": {"command": "k"}, "stale": {"command": "s"}}}
+            ),
             encoding="utf-8",
         )
         MCPIntegrator.remove_stale({"stale"}, runtime="cursor")

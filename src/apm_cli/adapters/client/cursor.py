@@ -52,7 +52,7 @@ class CursorClientAdapter(CopilotClientAdapter):
         return str(cursor_dir / "mcp.json")
 
     # ------------------------------------------------------------------ #
-    # Config read / write — override to avoid auto-creating the directory
+    # Config read / write -- override to avoid auto-creating the directory
     # ------------------------------------------------------------------ #
 
     def update_config(self, config_updates):
@@ -90,7 +90,7 @@ class CursorClientAdapter(CopilotClientAdapter):
             return {}
 
     # ------------------------------------------------------------------ #
-    # configure_mcp_server — thin override for the print label
+    # configure_mcp_server -- thin override for the print label
     # ------------------------------------------------------------------ #
 
     def configure_mcp_server(
@@ -140,9 +140,7 @@ class CursorClientAdapter(CopilotClientAdapter):
             )
             self.update_config({config_key: server_config})
 
-            print(
-                f"Successfully configured MCP server '{config_key}' for Cursor"
-            )
+            print(f"Successfully configured MCP server '{config_key}' for Cursor")
             return True
 
         except Exception as e:
@@ -150,7 +148,7 @@ class CursorClientAdapter(CopilotClientAdapter):
             return False
 
     # ------------------------------------------------------------------ #
-    # _format_server_config — delegate to parent, then transform for Cursor
+    # _format_server_config -- delegate to parent, then transform for Cursor
     # ------------------------------------------------------------------ #
 
     def _format_server_config(
@@ -163,21 +161,27 @@ class CursorClientAdapter(CopilotClientAdapter):
 
         Cursor requires ``type: "stdio"`` (not ``"local"``) and does not
         support the Copilot-specific ``tools`` and ``id`` fields.
+
+        Security: ``.cursor/mcp.json`` is repo-local and may be committed to
+        version control.  For GitHub MCP servers the parent injects a literal
+        ``Bearer <token>`` header; this override replaces it with a
+        ``${env:GITHUB_TOKEN}`` reference so the secret never touches disk.
+        Cursor resolves ``${env:...}`` from the process environment at runtime.
         """
         config = super()._format_server_config(server_info, env_overrides, runtime_vars)
-
-        # Adapt type field for Cursor compatibility
-        if config.get("type") == "local":
-            config["type"] = "stdio"
-        elif config.get("type") == "http":
-            # For remote endpoints, ensure type remains http (as opposed to sse, etc.)
-            # and normalize sse/streamable-http to http for Cursor
-            transport_type = server_info.get("remotes", [{}])[0].get("transport_type", "")
-            if transport_type in ("sse", "streamable-http"):
-                config["type"] = "http"
-
-        # Remove Copilot-only fields that cause Cursor's MCP loader to silently reject servers
         config.pop("tools", None)
         config.pop("id", None)
+        if config.get("type") == "local":
+            config["type"] = "stdio"
+
+        # Security: for GitHub MCP servers, replace the literal Bearer token
+        # that the parent injected with an env-var reference.  This mirrors
+        # the VS Code adapter's approach of not persisting secrets to disk.
+        remote = (server_info.get("remotes") or [{}])[0]
+        if self._is_github_server(server_info.get("name", ""), remote.get("url", "")):
+            headers = config.get("headers", {})
+            auth = headers.get("Authorization", "")
+            if auth.startswith("Bearer ") and not auth.startswith("Bearer ${"):
+                headers["Authorization"] = "Bearer ${env:GITHUB_TOKEN}"
 
         return config
